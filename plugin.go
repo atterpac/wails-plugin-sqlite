@@ -47,10 +47,11 @@ func NewPlugin(config *Config) *Sqlite {
 
 // Shutdown is called when the app is shutting down via runtime.Quit() call
 // You can use this to clean up any resources you have allocated
-func (p *Sqlite) Shutdown() {
+func (p *Sqlite) Shutdown() error {
 	if p.config.DeleteOnShutdown {
 		// Delete Database
 	}
+	return nil
 }
 
 // Name returns the name of the plugin.
