@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -27,13 +28,13 @@ type Config struct {
 	LinuxDir   string // XDG Default/DbName/DbName.db
 	// Shutdown Options
 	DeleteOnShutdown bool // Default false
+	DeleteDir        bool // Default false
 	// Connection Options
 	CacheShared        bool    // Default false
 	MaxOpenConnections int     // Default 1
 	MaxIdleConnections int     // Default 2
-	Driver             string  // mattn/cgoless options
 	DB                 *sql.DB // Connection created on Init
-	savedPath          string // interal use for cleanup
+	savedPath          string  // interal use for cleanup
 }
 
 // Changing the name of this struct will change the name of the plugin in the frontend
@@ -57,7 +58,12 @@ func (p *Sqlite) Shutdown() error {
 		if p.config.InMemory {
 			return nil
 		}
-		err := os.RemoveAll(p.config.savedPath)
+		var err error
+		if p.config.DeleteDir {
+			err = os.RemoveAll(filepath.Dir(p.config.savedPath))
+		} else {
+			err = os.RemoveAll(p.config.savedPath)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to delete database: %w", err)
 		}
@@ -133,41 +139,42 @@ func (sqls *Sqlite) createFileDB() error {
 	switch runtime.GOOS {
 	case "windows":
 		if sqls.config.WindowsDir != "" {
-			dbPath = filepath.Join(os.Getenv("APPDATA"), sqls.config.DbName, sqls.config.DbName+".db")
+			dbPath = sqls.config.WindowsDir
 		} else {
-			dbPath = filepath.Join(os.Getenv("APPDATA"), sqls.config.WindowsDir, sqls.config.DbName+".db")
+			dbPath = filepath.Join(os.Getenv("APPDATA"), sqls.config.WindowsDir)
 		}
 	case "darwin":
 		if sqls.config.MacDir != "" {
-			dbPath = filepath.Join(os.Getenv("HOME"), sqls.config.MacDir, sqls.config.DbName+".db")
+			dbPath = sqls.config.MacDir
 		} else {
 			dbPath = filepath.Join(os.Getenv("HOME"), "Library", "Application Support", sqls.config.DbName, sqls.config.DbName+".db")
 		}
 
 	case "linux":
 		if sqls.config.LinuxDir != "" {
-			dbPath = filepath.Join(os.Getenv("HOME"), sqls.config.LinuxDir, sqls.config.DbName+".db")
+			dbPath = sqls.config.LinuxDir
 		} else {
-			dbPath = filepath.Join(os.Getenv("HOME"), ".config", sqls.config.DbName, sqls.config.DbName+".db")
+			dbPath = filepath.Join(os.Getenv("HOME"), ".config", sqls.config.DbName)
 		}
 	default:
 		return errors.New("operating system not supported, please use Windows/macOS/Linux")
 	}
+	fileName := sqls.config.DbName + ".db"
 
 	if sqls.config.CacheShared {
-		dbPath += "?cache=shared"
+		fileName = fileName + "?cache=shared"
 	}
 
-	sqls.config.savedPath = filepath.Dir(dbPath) 
-
 	// Create directory if it doesn't exist
-	err := os.MkdirAll(filepath.Dir(dbPath), 0755)
+	err := os.MkdirAll(dbPath, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	// Create sqlite DB with name inside of Dir
-	db, err := sql.Open(sqls.config.Driver, dbPath)
+	dbPath = filepath.Join(dbPath, fileName)
+	sqls.config.savedPath = fileName
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to create database: %w", err)
 	}
@@ -184,6 +191,12 @@ func (sqls *Sqlite) createFileDB() error {
 	db.SetMaxIdleConns(idle)
 	db.SetMaxOpenConns(open)
 
+	err = db.Ping()
+	if err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	sqls.app.Logger.Info("Sqlite Initialized", "path", dbPath, "idle", idle, "open", open)
 	sqls.config.DB = db
 	return nil
 }
