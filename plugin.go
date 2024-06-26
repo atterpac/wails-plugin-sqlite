@@ -3,6 +3,9 @@ package sqlite
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -14,7 +17,7 @@ import (
 // Both the Init() and Shutdown() methods are called synchronously when the app starts and stops.
 
 type Config struct {
-    // Add any configuration options here
+	// Add any configuration options here
 	DbName string // Required input
 	// Memory Database
 	InMemory bool // Default false
@@ -27,22 +30,23 @@ type Config struct {
 	// Connection Options
 	CacheShared        bool    // Default false
 	MaxOpenConnections int     // Default 1
-	MaxIdleConnections int     // Default 1
+	MaxIdleConnections int     // Default 2
 	Driver             string  // mattn/cgoless options
 	DB                 *sql.DB // Connection created on Init
+	savedPath          string // interal use for cleanup
 }
 
-// Changing the name of this struct will change the name of the plugin in the frontend 
+// Changing the name of this struct will change the name of the plugin in the frontend
 // Bound methods will exist inside frontend/bindings/sqlite/[PluginStruct]
-type Sqlite struct{
-    config *Config
-    app *application.App
+type Sqlite struct {
+	config *Config
+	app    *application.App
 }
 
 func NewPlugin(config *Config) *Sqlite {
 	return &Sqlite{
-        config: config,
-    }
+		config: config,
+	}
 }
 
 // Shutdown is called when the app is shutting down via runtime.Quit() call
@@ -50,6 +54,13 @@ func NewPlugin(config *Config) *Sqlite {
 func (p *Sqlite) Shutdown() error {
 	if p.config.DeleteOnShutdown {
 		// Delete Database
+		if p.config.InMemory {
+			return nil
+		}
+		err := os.RemoveAll(p.config.savedPath)
+		if err != nil {
+			return fmt.Errorf("failed to delete database: %w", err)
+		}
 	}
 	return nil
 }
@@ -64,7 +75,7 @@ func (p *Sqlite) Name() string {
 // initialise any resources you need. You can also access the application
 // instance via the app property.
 func (p *Sqlite) Init() error {
-    p.app = application.Get()
+	p.app = application.Get()
 	if p.config.InMemory {
 		return p.createMemDB()
 	}
@@ -79,7 +90,7 @@ func (p *Sqlite) Init() error {
 // The only requirement is that they are exported (start with a capital letter).
 // You can also return any type that is JSON serializable.
 // See https://golang.org/pkg/encoding/json/#Marshal for more information.
-func (sqls Sqlite) Execute(cmd string, args... any) (int64, error) {
+func (sqls Sqlite) Execute(cmd string, args ...any) (int64, error) {
 	result, err := sqls.config.DB.Exec(cmd, args)
 	if err != nil {
 		return 0, err
@@ -91,7 +102,7 @@ func (sqls Sqlite) Execute(cmd string, args... any) (int64, error) {
 	return affected, nil
 }
 
-func (sqls Sqlite) Query(query string, args... any) (*sql.Rows, error) {
+func (sqls Sqlite) Query(query string, args ...any) (*sql.Rows, error) {
 	return sqls.config.DB.Query(query, args)
 }
 
@@ -107,23 +118,72 @@ func (sqls *Sqlite) SetDB(newDB *sql.DB) error {
 	return errors.New("Attempted to set DB but provided pointer was nil")
 }
 
-func (sqls Sqlite) createMemDB() error {
+func (sqls *Sqlite) createMemDB() error {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		return fmt.Errorf("failed to create in-memory database: %w", err)
+	}
 
+	sqls.config.DB = db
 	return nil
 }
 
-func (sqls Sqlite) createFileDB() error {
+func (sqls *Sqlite) createFileDB() error {
+	var dbPath string
 	switch runtime.GOOS {
 	case "windows":
-		// mkdir %APPDATA%
+		if sqls.config.WindowsDir != "" {
+			dbPath = filepath.Join(os.Getenv("APPDATA"), sqls.config.DbName, sqls.config.DbName+".db")
+		} else {
+			dbPath = filepath.Join(os.Getenv("APPDATA"), sqls.config.WindowsDir, sqls.config.DbName+".db")
+		}
 	case "darwin":
-		// mkdir /ApplicationSupport/AppData
+		if sqls.config.MacDir != "" {
+			dbPath = filepath.Join(os.Getenv("HOME"), sqls.config.MacDir, sqls.config.DbName+".db")
+		} else {
+			dbPath = filepath.Join(os.Getenv("HOME"), "Library", "Application Support", sqls.config.DbName, sqls.config.DbName+".db")
+		}
+
 	case "linux":
-		// mkdir XDG DataDir
+		if sqls.config.LinuxDir != "" {
+			dbPath = filepath.Join(os.Getenv("HOME"), sqls.config.LinuxDir, sqls.config.DbName+".db")
+		} else {
+			dbPath = filepath.Join(os.Getenv("HOME"), ".config", sqls.config.DbName, sqls.config.DbName+".db")
+		}
 	default:
-		return errors.New("Operating system not supported, please use Windows/MacOs/Linux")
+		return errors.New("operating system not supported, please use Windows/macOS/Linux")
 	}
-	// Create Direcotry if doesnt exist
+
+	if sqls.config.CacheShared {
+		dbPath += "?cache=shared"
+	}
+
+	sqls.config.savedPath = filepath.Dir(dbPath) 
+
+	// Create directory if it doesn't exist
+	err := os.MkdirAll(filepath.Dir(dbPath), 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
 	// Create sqlite DB with name inside of Dir
+	db, err := sql.Open(sqls.config.Driver, dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to create database: %w", err)
+	}
+
+	idle := sqls.config.MaxIdleConnections
+	open := sqls.config.MaxOpenConnections
+	// Set connection options
+	if idle == 0 {
+		idle = 2
+	}
+	if open == 0 {
+		open = 1
+	}
+	db.SetMaxIdleConns(idle)
+	db.SetMaxOpenConns(open)
+
+	sqls.config.DB = db
 	return nil
 }

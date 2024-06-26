@@ -1,4 +1,4 @@
-module sqlite
+module github.com/atterpac/wails-plugin-sqlite
 
 go 1.22.4
 
